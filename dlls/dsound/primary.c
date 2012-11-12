@@ -157,7 +157,11 @@ static WAVEFORMATEX *DSOUND_WaveFormat(DirectSoundDevice *device, IAudioClient *
             static int once;
             if (!once++)
                 FIXME("Limiting channels to 2 due to lack of multichannel support\n");
-            mixwfe->Format.nChannels = 2;
+
+            w = &mixwfe->Format;
+            w->nChannels = 2;
+            w->nBlockAlign = w->nChannels * w->wBitsPerSample / 8;
+            w->nAvgBytesPerSec = w->nSamplesPerSec * w->nBlockAlign;
         }
 
         if (!IsEqualGUID(&mixwfe->SubFormat, &KSDATAFORMAT_SUBTYPE_IEEE_FLOAT)) {
