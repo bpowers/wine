@@ -3388,10 +3388,18 @@ INT WINAPI WSAIoctl(SOCKET s, DWORD code, LPVOID in_buff, DWORD in_size, LPVOID 
        }
 
    case WS_SIO_ADDRESS_LIST_CHANGE:
-       FIXME("-> SIO_ADDRESS_LIST_CHANGE request: stub\n");
-       /* FIXME: error and return code depend on whether socket was created
-        * with WSA_FLAG_OVERLAPPED, but there is no easy way to get this */
+   {
+       HANDLE handle;
+
+       TRACE("-> SIO_ADDRESS_LIST_CHANGE request\n");
+
+       if (overlapped || _is_blocking(s))
+           status = NotifyAddrChange(&handle, overlapped);
+       else
+           status = WSAEWOULDBLOCK;
+       overlapped = NULL; /* managed by NotifyAddrChange */
        break;
+   }
 
    case WS_SIO_ADDRESS_LIST_QUERY:
    {
