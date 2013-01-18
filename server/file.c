@@ -219,7 +219,12 @@ static struct object *create_file( struct fd *root, const char *nameptr, data_si
         mode = sd_to_mode( sd, owner );
     }
     else
-        mode = (attrs & FILE_ATTRIBUTE_READONLY) ? 0444 : 0666;
+    {
+        if (options & FILE_NON_DIRECTORY_FILE)
+            mode = (attrs & FILE_ATTRIBUTE_READONLY) ? 0444 : 0666;
+        else
+            mode = (attrs & FILE_ATTRIBUTE_READONLY) ? 0555 : 0777;
+    }
 
     if (len >= 4 &&
         (!strcasecmp( name + len - 4, ".exe" ) || !strcasecmp( name + len - 4, ".com" )))

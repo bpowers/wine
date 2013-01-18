@@ -24,6 +24,15 @@
 #include "windef.h"
 #include "winbase.h"
 #include "winerror.h"
+#include "aclapi.h"
+
+static DWORD (WINAPI *pGetNamedSecurityInfoA)(LPSTR, SE_OBJECT_TYPE, SECURITY_INFORMATION,
+                                              PSID*, PSID*, PACL*, PACL*,
+                                              PSECURITY_DESCRIPTOR*);
+static BOOL (WINAPI *pGetAclInformation)(PACL,LPVOID,DWORD,ACL_INFORMATION_CLASS);
+static BOOL (WINAPI *pCreateWellKnownSid)(WELL_KNOWN_SID_TYPE,PSID,PSID,DWORD*);
+static BOOL (WINAPI *pAddAccessAllowedAceEx)(PACL, DWORD, DWORD, DWORD, PSID);
+static BOOL (WINAPI *pGetAce)(PACL,DWORD,LPVOID*);
 
 /* If you change something in these tests, please do the same
  * for GetSystemDirectory tests.
@@ -486,8 +495,128 @@ static void test_SetCurrentDirectoryA(void)
     ok( GetLastError() == ERROR_PATH_NOT_FOUND, "wrong error %d\n", GetLastError() );
 }
 
+static void test_security_attributes(void)
+{
+    char admin_ptr[sizeof(SID)+sizeof(ULONG)*SID_MAX_SUB_AUTHORITIES], dacl[100], *user;
+    DWORD sid_size = sizeof(admin_ptr), user_size;
+    PSID admin_sid = (PSID) admin_ptr, user_sid;
+    char sd[SECURITY_DESCRIPTOR_MIN_LENGTH];
+    PSECURITY_DESCRIPTOR pSD = &sd;
+    ACL_SIZE_INFORMATION acl_size;
+    PACL pDacl = (PACL) &dacl;
+    ACCESS_ALLOWED_ACE *ace;
+    SECURITY_ATTRIBUTES sa;
+    char tmpdir[MAX_PATH];
+    struct _SID *owner;
+    BOOL bret = TRUE;
+    HANDLE token;
+    DWORD error;
+
+    if (!pGetNamedSecurityInfoA || !pCreateWellKnownSid)
+    {
+        win_skip("Required functions are not available\n");
+        return;
+    }
+
+    if (!OpenThreadToken(GetCurrentThread(), TOKEN_READ, TRUE, &token))
+    {
+        if (GetLastError() != ERROR_NO_TOKEN) bret = FALSE;
+        else if (!OpenProcessToken(GetCurrentProcess(), TOKEN_READ, &token)) bret = FALSE;
+    }
+    if (!bret)
+    {
+        win_skip("Failed to get current user token\n");
+        return;
+    }
+    bret = GetTokenInformation(token, TokenUser, NULL, 0, &user_size);
+    ok(!bret && (GetLastError() == ERROR_INSUFFICIENT_BUFFER),
+        "GetTokenInformation(TokenUser) failed with error %d\n", GetLastError());
+    user = HeapAlloc(GetProcessHeap(), 0, user_size);
+    bret = GetTokenInformation(token, TokenUser, user, user_size, &user_size);
+    ok(bret, "GetTokenInformation(TokenUser) failed with error %d\n", GetLastError());
+    CloseHandle( token );
+    user_sid = ((TOKEN_USER *)user)->User.Sid;
+
+    sa.nLength = sizeof(sa);
+    sa.lpSecurityDescriptor = pSD;
+    sa.bInheritHandle = TRUE;
+    InitializeSecurityDescriptor(pSD, SECURITY_DESCRIPTOR_REVISION);
+    pCreateWellKnownSid(WinBuiltinAdministratorsSid, NULL, admin_sid, &sid_size);
+    bret = InitializeAcl(pDacl, sizeof(dacl), ACL_REVISION);
+    ok(bret, "Failed to initialize ACL.\n");
+    bret = pAddAccessAllowedAceEx(pDacl, ACL_REVISION, OBJECT_INHERIT_ACE|CONTAINER_INHERIT_ACE,
+                                  GENERIC_ALL, user_sid);
+    ok(bret, "Failed to add Current User to ACL.\n");
+    bret = pAddAccessAllowedAceEx(pDacl, ACL_REVISION, OBJECT_INHERIT_ACE|CONTAINER_INHERIT_ACE,
+                                  GENERIC_ALL, admin_sid);
+    ok(bret, "Failed to add Administrator Group to ACL.\n");
+    bret = SetSecurityDescriptorDacl(pSD, TRUE, pDacl, FALSE);
+    ok(bret, "Failed to add ACL to security desciptor.\n");
+
+    GetTempPathA(MAX_PATH, tmpdir);
+    lstrcatA(tmpdir, "Please Remove Me");
+    bret = CreateDirectoryA(tmpdir, &sa);
+    ok(bret == TRUE, "CreateDirectoryA(%s) failed err=%d\n", tmpdir, GetLastError());
+
+    SetLastError(0xdeadbeef);
+    error = pGetNamedSecurityInfoA(tmpdir, SE_FILE_OBJECT,
+                                   OWNER_SECURITY_INFORMATION|DACL_SECURITY_INFORMATION, (PSID*)&owner,
+                                   NULL, &pDacl, NULL, &pSD);
+    if (error != ERROR_SUCCESS && (GetLastError() == ERROR_CALL_NOT_IMPLEMENTED))
+    {
+        win_skip("GetNamedSecurityInfoA is not implemented\n");
+        goto done;
+    }
+    ok(!error, "GetNamedSecurityInfo failed with error %d\n", error);
+
+    bret = pGetAclInformation(pDacl, &acl_size, sizeof(acl_size), AclSizeInformation);
+    ok(bret, "GetAclInformation failed\n");
+    ok(acl_size.AceCount == 2, "GetAclInformation returned unexpected entry count (%d != 2).\n",
+                               acl_size.AceCount);
+    if (acl_size.AceCount > 0)
+    {
+        bret = pGetAce(pDacl, 0, (VOID **)&ace);
+        ok(bret, "Failed to get Current User ACE.\n");
+        bret = EqualSid(&ace->SidStart, user_sid);
+        todo_wine ok(bret, "Current User ACE != Current User SID.\n");
+        ok(((ACE_HEADER *)ace)->AceFlags == (OBJECT_INHERIT_ACE|CONTAINER_INHERIT_ACE),
+           "Current User ACE has unexpected flags (0x%x != 0x03)\n", ((ACE_HEADER *)ace)->AceFlags);
+        ok(ace->Mask == 0x1f01ff, "Current User ACE has unexpected mask (0x%x != 0x1f01ff)\n",
+                                  ace->Mask);
+    }
+    if (acl_size.AceCount > 1)
+    {
+        bret = pGetAce(pDacl, 1, (VOID **)&ace);
+        ok(bret, "Failed to get Administators Group ACE.\n");
+        bret = EqualSid(&ace->SidStart, admin_sid);
+        todo_wine ok(bret, "Administators Group ACE != Administators Group SID.\n");
+        ok(((ACE_HEADER *)ace)->AceFlags == (OBJECT_INHERIT_ACE|CONTAINER_INHERIT_ACE),
+           "Administators Group ACE has unexpected flags (0x%x != 0x03)\n", ((ACE_HEADER *)ace)->AceFlags);
+        ok(ace->Mask == 0x1f01ff, "Administators Group ACE has unexpected mask (0x%x != 0x1f01ff)\n",
+                                  ace->Mask);
+    }
+
+done:
+    HeapFree(GetProcessHeap(), 0, user);
+    bret = RemoveDirectoryA(tmpdir);
+    ok(bret == TRUE, "RemoveDirectoryA should always succeed\n");
+}
+
+void init(void)
+{
+    HMODULE hmod = GetModuleHandle("advapi32.dll");
+
+    pGetNamedSecurityInfoA = (void *)GetProcAddress(hmod, "GetNamedSecurityInfoA");
+    pAddAccessAllowedAceEx = (void *)GetProcAddress(hmod, "AddAccessAllowedAceEx");
+    pCreateWellKnownSid = (void *)GetProcAddress(hmod, "CreateWellKnownSid");
+    pGetAclInformation = (void *)GetProcAddress(hmod, "GetAclInformation");
+    pGetAce = (void *)GetProcAddress(hmod, "GetAce");
+}
+
 START_TEST(directory)
 {
+    init();
+
     test_GetWindowsDirectoryA();
     test_GetWindowsDirectoryW();
 
@@ -501,4 +630,6 @@ START_TEST(directory)
     test_RemoveDirectoryW();
 
     test_SetCurrentDirectoryA();
+
+    test_security_attributes();
 }
