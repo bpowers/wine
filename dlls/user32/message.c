@@ -4385,12 +4385,17 @@ UINT_PTR WINAPI SetTimer( HWND hwnd, UINT_PTR id, UINT timeout, TIMERPROC proc )
 
     if (proc) winproc = WINPROC_AllocProc( (WNDPROC)proc, FALSE );
 
+    if (timeout < USER_TIMER_MINIMUM)
+        timeout = USER_TIMER_MINIMUM;
+    else if (timeout > USER_TIMER_MAXIMUM)
+        timeout = USER_TIMER_MAXIMUM;
+
     SERVER_START_REQ( set_win_timer )
     {
         req->win    = wine_server_user_handle( hwnd );
         req->msg    = WM_TIMER;
         req->id     = id;
-        req->rate   = max( timeout, SYS_TIMER_RATE );
+        req->rate   = timeout;
         req->lparam = (ULONG_PTR)winproc;
         if (!wine_server_call_err( req ))
         {
