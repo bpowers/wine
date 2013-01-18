@@ -418,6 +418,7 @@ AC_CHECK_HEADERS(\
 	arpa/inet.h \
 	arpa/nameser.h \
 	asm/types.h \
+	attr/xattr.h \
 	capi20.h \
 	curses.h \
 	direct.h \
