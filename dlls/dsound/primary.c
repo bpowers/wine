@@ -454,10 +454,15 @@ HRESULT primarybuffer_SetFormat(DirectSoundDevice *device, LPCWAVEFORMATEX passe
 		if (IsEqualGUID(&fmtex->SubFormat, &KSDATAFORMAT_SUBTYPE_IEEE_FLOAT) &&
 		    passed_fmt->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) {
 			fmt->wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
+			fmt->wBitsPerSample = 32;
 		} else {
 			fmt->wFormatTag = WAVE_FORMAT_PCM;
-			fmt->wBitsPerSample = 16;
+			fmt->wBitsPerSample = passed_fmt->wBitsPerSample;
 		}
+		fmt->nSamplesPerSec = passed_fmt->nSamplesPerSec;
+		fmt->nChannels = passed_fmt->nChannels;
+		if (fmt->nChannels > device->pwfx->nChannels)
+			fmt->nChannels = device->pwfx->nChannels;
 		fmt->nBlockAlign = fmt->nChannels * fmt->wBitsPerSample / 8;
 		fmt->nAvgBytesPerSec = fmt->nBlockAlign * fmt->nSamplesPerSec;
 		fmt->cbSize = 0;
