@@ -1140,6 +1140,10 @@ This probably prevents linking to OpenGL. Try deleting the file and restarting c
         if test "x$with_osmesa" != "xno"
         then
             WINE_CHECK_SONAME(OSMesa,glAccum,,,[$X_LIBS $X_PRE_LIBS $XLIB -lm $X_EXTRA_LIBS])
+            WINE_CHECK_SONAME(OSMesa,OSMesaCreateContext,,,[$X_LIBS $X_PRE_LIBS $XLIB -lm $X_EXTRA_LIBS])
+            if test "x$ac_cv_lib_soname_OSMesa" = "x"; then
+               WINE_CHECK_SONAME(OSMesa,OSMesaCreateContext,,,[-lglapi $X_LIBS $X_PRE_LIBS $XLIB -lm $X_EXTRA_LIBS])
+            fi
             WINE_NOTICE_WITH(osmesa,[test "x$ac_cv_lib_soname_OSMesa" = "x"],
                              [libOSMesa ${notice_platform}development files not found (or too old), OpenGL rendering in bitmaps won't be supported.])
         fi
