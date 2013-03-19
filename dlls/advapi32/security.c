@@ -5584,9 +5584,15 @@ DWORD WINAPI GetNamedSecurityInfoW( LPWSTR name, SE_OBJECT_TYPE type,
     SECURITY_INFORMATION info, PSID* owner, PSID* group, PACL* dacl,
     PACL* sacl, PSECURITY_DESCRIPTOR* descriptor )
 {
-    DWORD access = 0;
-    HANDLE handle;
-    DWORD err;
+    char b[sizeof(TOKEN_USER) + sizeof(SID) + sizeof(DWORD)*SID_MAX_SUB_AUTHORITIES], admin_data[28];
+    DWORD owner_len = sizeof(sidWorld), admin_len = sizeof(admin_data);
+    PSID owner_sid = &sidWorld, admin_sid = (PSID) admin_data;
+    SECURITY_DESCRIPTOR_RELATIVE *relative = NULL;
+    DWORD needed, offset;
+    DWORD l = sizeof(b);
+    BOOL ret = TRUE;
+    HANDLE token;
+    BYTE *buffer;
 
     TRACE( "%s %d %d %p %p %p %p %p\n", debugstr_w(name), type, info, owner,
            group, dacl, sacl, descriptor );
@@ -5602,44 +5608,123 @@ DWORD WINAPI GetNamedSecurityInfoW( LPWSTR name, SE_OBJECT_TYPE type,
     ||  ((info & SACL_SECURITY_INFORMATION)  && !sacl)  ))
         return ERROR_INVALID_PARAMETER;
 
-    if (info & (OWNER_SECURITY_INFORMATION|GROUP_SECURITY_INFORMATION|DACL_SECURITY_INFORMATION))
-        access |= READ_CONTROL;
-    if (info & SACL_SECURITY_INFORMATION)
-        access |= ACCESS_SYSTEM_SECURITY;
-
-    switch (type)
+    if (!OpenThreadToken(GetCurrentThread(), TOKEN_READ, TRUE, &token))
     {
-    case SE_SERVICE:
-        if (!(err = get_security_service( name, access, &handle )))
-        {
-            err = GetSecurityInfo( handle, type, info, owner, group, dacl, sacl, descriptor );
-            CloseServiceHandle( handle );
-        }
-        break;
-    case SE_REGISTRY_KEY:
-        if (!(err = get_security_regkey( name, access, &handle )))
-        {
-            err = GetSecurityInfo( handle, type, info, owner, group, dacl, sacl, descriptor );
-            RegCloseKey( handle );
-        }
-        break;
-    case SE_FILE_OBJECT:
-        if (!(err = get_security_file( name, access, &handle )))
-        {
-            err = GetSecurityInfo( handle, type, info, owner, group, dacl, sacl, descriptor );
-            CloseHandle( handle );
-        }
-        break;
-    default:
-        FIXME( "Object type %d is not currently supported.\n", type );
-        if (owner) *owner = NULL;
-        if (group) *group = NULL;
-        if (dacl) *dacl = NULL;
-        if (sacl) *sacl = NULL;
-        if (descriptor) *descriptor = NULL;
-        return ERROR_SUCCESS;
+        if (GetLastError() != ERROR_NO_TOKEN) ret = FALSE;
+        else if (!OpenProcessToken(GetCurrentProcess(), TOKEN_READ, &token)) ret = FALSE;
     }
-    return err;
+    if (ret)
+    {
+        ret = GetTokenInformation(token, TokenUser, b, l, &l);
+        CloseHandle( token );
+    }
+    if (ret)
+    {
+        owner_sid = ((TOKEN_USER *)b)->User.Sid;
+        owner_len = GetLengthSid(owner_sid);
+    }
+    CreateWellKnownSid(0x1a, NULL, admin_sid, &admin_len);
+
+    needed = !descriptor ? 0 : sizeof(SECURITY_DESCRIPTOR_RELATIVE);
+    if (info & OWNER_SECURITY_INFORMATION)
+        needed += owner_len;
+    if (info & GROUP_SECURITY_INFORMATION)
+        needed += sizeof(sidWorld);
+    if (info & DACL_SECURITY_INFORMATION)
+        needed += (sizeof(ACL) + sizeof(ACCESS_ALLOWED_ACE)*2 + owner_len + admin_len - sizeof(DWORD)*2);
+    if (info & SACL_SECURITY_INFORMATION)
+        needed += WINE_SIZE_OF_WORLD_ACCESS_ACL;
+
+    if(descriptor)
+    {
+        /* must be freed by caller */
+        *descriptor = HeapAlloc( GetProcessHeap(), 0, needed );
+        if (!*descriptor) return ERROR_NOT_ENOUGH_MEMORY;
+
+        if (!InitializeSecurityDescriptor( *descriptor, SECURITY_DESCRIPTOR_REVISION ))
+        {
+            HeapFree( GetProcessHeap(), 0, *descriptor );
+            return ERROR_INVALID_SECURITY_DESCR;
+        }
+
+        relative = *descriptor;
+        relative->Control |= SE_SELF_RELATIVE;
+
+        buffer = (BYTE *)relative;
+        offset = sizeof(SECURITY_DESCRIPTOR_RELATIVE);
+    }
+    else
+    {
+        buffer = HeapAlloc( GetProcessHeap(), 0, needed );
+        if (!buffer) return ERROR_NOT_ENOUGH_MEMORY;
+        offset = 0;
+    }
+
+    if (info & OWNER_SECURITY_INFORMATION)
+    {
+        memcpy( buffer + offset, owner_sid, owner_len );
+
+        if(relative)
+            relative->Owner = offset;
+        if (owner)
+            *owner = buffer + offset;
+        offset += owner_len;
+    }
+    if (info & GROUP_SECURITY_INFORMATION)
+    {
+        memcpy( buffer + offset, &sidWorld, sizeof(sidWorld) );
+        if(relative)
+            relative->Group = offset;
+        if (group)
+            *group = buffer + offset;
+        offset += sizeof(sidWorld);
+    }
+    if (info & DACL_SECURITY_INFORMATION)
+    {
+        PACL pACL = (PACL)(buffer + offset);
+        PACCESS_ALLOWED_ACE pACE = (PACCESS_ALLOWED_ACE) (pACL + 1);
+
+        pACL->AclRevision = ACL_REVISION;
+        pACL->Sbz1 = 0;
+        pACL->AclSize = (sizeof(ACL) + sizeof(ACCESS_ALLOWED_ACE)*2 + owner_len*2 - sizeof(DWORD)*2);
+        pACL->AceCount = 2;
+        pACL->Sbz2 = 0;
+
+        pACE->Header.AceType = ACCESS_ALLOWED_ACE_TYPE;
+        pACE->Header.AceFlags = OBJECT_INHERIT_ACE|CONTAINER_INHERIT_ACE;
+        pACE->Header.AceSize = sizeof(ACCESS_ALLOWED_ACE) + owner_len - sizeof(DWORD);
+        pACE->Mask = 0xf3ffffff; /* Everything except reserved bits */
+        memcpy(&pACE->SidStart, owner_sid, owner_len);
+
+        pACE = (PACCESS_ALLOWED_ACE)((char *)pACE + pACE->Header.AceSize);
+        pACE->Header.AceType = ACCESS_ALLOWED_ACE_TYPE;
+        pACE->Header.AceFlags = OBJECT_INHERIT_ACE|CONTAINER_INHERIT_ACE;
+        pACE->Header.AceSize = sizeof(ACCESS_ALLOWED_ACE) + admin_len - sizeof(DWORD);
+        pACE->Mask = 0xf3ffffff; /* Everything except reserved bits */
+        memcpy(&pACE->SidStart, admin_sid, admin_len);
+
+        if(relative)
+        {
+            relative->Control |= SE_DACL_PRESENT;
+            relative->Dacl = offset;
+        }
+        if (dacl)
+            *dacl = (PACL)(buffer + offset);
+        offset += WINE_SIZE_OF_WORLD_ACCESS_ACL;
+    }
+    if (info & SACL_SECURITY_INFORMATION)
+    {
+        GetWorldAccessACL( (PACL)(buffer + offset) );
+        if(relative)
+        {
+            relative->Control |= SE_SACL_PRESENT;
+            relative->Sacl = offset;
+        }
+        if (sacl)
+            *sacl = (PACL)(buffer + offset);
+    }
+
+    return ERROR_SUCCESS;
 }
 
 /******************************************************************************
